@@ -573,6 +573,8 @@ type MultiplexingConfig struct {
 	Enabled bool `protobuf:"varint,1,opt,name=enabled,proto3" json:"enabled,omitempty"`
 	// Max number of concurrent connections that one Mux connection can handle.
 	Concurrency uint32 `protobuf:"varint,2,opt,name=concurrency,proto3" json:"concurrency,omitempty"`
+	// The type of the mux to be used, mux or smux
+	Type string
 }
 
 func (x *MultiplexingConfig) Reset() {

@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"github.com/xtls/xray-core/common/smux"
 
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/common"
@@ -53,6 +54,7 @@ type Handler struct {
 	proxy           proxy.Outbound
 	outboundManager outbound.Manager
 	mux             *mux.ClientManager
+	smux            *smux.SmuxManager
 	uplinkCounter   stats.Counter
 	downlinkCounter stats.Counter
 }
@@ -106,18 +108,23 @@ func NewHandler(ctx context.Context, config *core.OutboundHandlerConfig) (outbou
 		if config.Concurrency < 1 || config.Concurrency > 1024 {
 			return nil, newError("invalid mux concurrency: ", config.Concurrency).AtWarning()
 		}
-		h.mux = &mux.ClientManager{
-			Enabled: h.senderSettings.MultiplexSettings.Enabled,
-			Picker: &mux.IncrementalWorkerPicker{
-				Factory: &mux.DialingWorkerFactory{
-					Proxy:  proxyHandler,
-					Dialer: h,
-					Strategy: mux.ClientStrategy{
-						MaxConcurrency: config.Concurrency,
-						MaxConnection:  128,
+		switch config.Type {
+		case "smux":
+			h.smux = smux.NewSmuxManager()
+		default:
+			h.mux = &mux.ClientManager{
+				Enabled: h.senderSettings.MultiplexSettings.Enabled,
+				Picker: &mux.IncrementalWorkerPicker{
+					Factory: &mux.DialingWorkerFactory{
+						Proxy:  proxyHandler,
+						Dialer: h,
+						Strategy: mux.ClientStrategy{
+							MaxConcurrency: config.Concurrency,
+							MaxConnection:  128,
+						},
 					},
 				},
-			},
+			}
 		}
 	}
 

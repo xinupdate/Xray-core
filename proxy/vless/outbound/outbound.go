@@ -110,6 +110,9 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	if target.Address.Family().IsDomain() && target.Address.Domain() == "v1.mux.cool" {
 		command = protocol.RequestCommandMux
 	}
+	if target.Address.Family().IsDomain() && target.Address.Domain() == "v1.smux.cool" {
+		command = protocol.RequestCommandSmux
+	}
 
 	request := &protocol.RequestHeader{
 		Version: encoding.Version,
