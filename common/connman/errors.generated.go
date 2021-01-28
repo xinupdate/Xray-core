@@ -1,4 +1,4 @@
-package smux
+package connman
 
 import "github.com/xtls/xray-core/common/errors"
 

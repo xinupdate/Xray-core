@@ -2,8 +2,6 @@ package outbound
 
 import (
 	"context"
-	"github.com/xtls/xray-core/common/smux"
-
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/mux"
@@ -54,7 +52,6 @@ type Handler struct {
 	proxy           proxy.Outbound
 	outboundManager outbound.Manager
 	mux             *mux.ClientManager
-	smux            *smux.SmuxManager
 	uplinkCounter   stats.Counter
 	downlinkCounter stats.Counter
 }
@@ -109,8 +106,6 @@ func NewHandler(ctx context.Context, config *core.OutboundHandlerConfig) (outbou
 			return nil, newError("invalid mux concurrency: ", config.Concurrency).AtWarning()
 		}
 		switch config.Type {
-		case "smux":
-			h.smux = smux.NewSmuxManager()
 		default:
 			h.mux = &mux.ClientManager{
 				Enabled: h.senderSettings.MultiplexSettings.Enabled,

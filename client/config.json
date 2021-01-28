@@ -21,7 +21,7 @@
           {
             "address": "127.0.0.1",
             "port": 10801,
-            "mux": true,
+            "smux": true,
             "users": [
               {
                 "id": "5422b403-c1ee-463c-a3c0-104599582286",
