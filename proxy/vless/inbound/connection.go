@@ -28,8 +28,9 @@ func NewInboundConn(conn net.Conn, validator *vless.Validator) *InboundConn {
 		conn:            conn,
 		header:          new(protocol.RequestHeader),
 		isHeaderWritten: false,
-		isHeaderRead:    false,
-		validator:       validator,
+		// TODO: set this to false so that the connection object can parse the header
+		isHeaderRead: true,
+		validator:    validator,
 		addrParser: protocol.NewAddressParser(
 			protocol.AddressFamilyByte(byte(protocol.AddressTypeIPv4), net.AddressFamilyIPv4),
 			protocol.AddressFamilyByte(byte(protocol.AddressTypeDomain), net.AddressFamilyDomain),
@@ -103,13 +104,10 @@ func (c *InboundConn) readHeader() error {
 		// Parse port and address
 		buffer.Clear()
 		switch c.header.Command {
-		case protocol.RequestCommandSmux:
-			c.header.Address = net.DomainAddress("v1.smux.cool")
-			c.header.Port = 0
 		case protocol.RequestCommandMux:
 			c.header.Address = net.DomainAddress("v1.mux.cool")
 			c.header.Port = 0
-		case protocol.RequestCommandTCP, protocol.RequestCommandUDP:
+		case protocol.RequestCommandTCP, protocol.RequestCommandUDP, protocol.RequestCommandSmux:
 			if addr, port, err := addrParser.ReadAddressPort(&buffer, c.conn); err == nil {
 				c.header.Address = addr
 				c.header.Port = port

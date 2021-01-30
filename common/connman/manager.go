@@ -3,9 +3,12 @@ package connman
 import (
 	"context"
 	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/transport/internet"
 	"sync"
 )
+
+type setupConnection func(connection internet.Connection, header *protocol.RequestHeader) (internet.Connection, error)
 
 type SmuxManager struct {
 	access           sync.RWMutex
@@ -18,36 +21,49 @@ func NewSmuxManager() *SmuxManager {
 	}
 }
 
-func (sm *SmuxManager) addConnection(ctx context.Context, dest net.Destination, dialer internet.Dialer) error {
-	conn, err := dialer.Dial(ctx, dest)
-	if err != nil {
-		return err
-	}
-
-	sm.muxConnectionMap[dest] = conn
-	return nil
-}
-
-func (sm *SmuxManager) GetConnection(ctx context.Context, dest net.Destination, dialer internet.Dialer) (internet.Connection, error) {
-	sm.access.Lock()
-	defer sm.access.Unlock()
-
-	// Check if the connection already exist
-	if _, ok := sm.muxConnectionMap[dest]; !ok {
-		// Using existing MUX connection
-		if err := sm.addConnection(ctx, dest, dialer); err != nil {
-			return nil, err
-		}
-	}
-
-	// Connection should exist
-	if conn, ok := sm.muxConnectionMap[dest]; !ok {
-		return nil, newError("error retrieving existing mux session")
+func (sm *SmuxManager) dialConnection(ctx context.Context, dest net.Destination, dialer internet.Dialer) (internet.Connection, error) {
+	if conn, err := dialer.Dial(ctx, dest); err != nil {
+		return nil, err
 	} else {
 		return conn, nil
 	}
 }
 
-func (sm *SmuxManager) removeConnection(dest net.Destination) {
+func (sm *SmuxManager) setConnection(dest net.Destination, connection internet.Connection) {
+	if conn, ok := sm.muxConnectionMap[dest]; ok {
+		_ = conn.Close()
+	}
+	sm.muxConnectionMap[dest] = connection
+}
 
+func (sm *SmuxManager) GetConnection(ctx context.Context, dest net.Destination, dialer internet.Dialer, header *protocol.RequestHeader, connSetup setupConnection) (internet.Connection, error) {
+	sm.access.Lock()
+	defer sm.access.Unlock()
+
+	if conn, ok := sm.muxConnectionMap[dest]; ok {
+		return conn, nil
+	}
+
+	conn, err := sm.dialConnection(ctx, dest, dialer)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err = connSetup(conn, header)
+	if err != nil {
+		return nil, err
+	}
+
+	sm.setConnection(dest, conn)
+	return conn, nil
+}
+
+func (sm *SmuxManager) RemoveConnection(dest net.Destination) {
+	sm.access.Lock()
+	defer sm.access.Unlock()
+
+	if conn, ok := sm.muxConnectionMap[dest]; ok {
+		_ = conn.Close()
+		delete(sm.muxConnectionMap, dest)
+	}
 }
