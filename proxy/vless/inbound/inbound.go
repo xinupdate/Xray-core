@@ -4,12 +4,7 @@ package inbound
 
 import (
 	"context"
-	"io"
-	"strconv"
-	"strings"
-	"syscall"
-	"time"
-
+	"github.com/xtaci/smux"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
@@ -27,11 +22,17 @@ import (
 	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/features/stats"
+	simplesocks "github.com/xtls/xray-core/proxy/simplesocks/inbound"
 	"github.com/xtls/xray-core/proxy/vless"
 	"github.com/xtls/xray-core/proxy/vless/encoding"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/tls"
 	"github.com/xtls/xray-core/transport/internet/xtls"
+	"io"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
 )
 
 var (
@@ -110,11 +111,37 @@ func New(ctx context.Context, config *Config, dc dns.Client) (*Handler, error) {
 			*/
 		}
 		if handler.fallbacks[""] != nil {
-			for alpn, pfb := range handler.fallbacks {
-				if alpn != "" { // && alpn != "h2" {
-					for path, fb := range handler.fallbacks[""] {
-						if pfb[path] == nil {
-							pfb[path] = fb
+			for name, apfb := range handler.fallbacks {
+				if name != "" {
+					for alpn := range handler.fallbacks[""] {
+						if apfb[alpn] == nil {
+							apfb[alpn] = make(map[string]*Fallback)
+						}
+					}
+				}
+			}
+		}
+		for _, apfb := range handler.fallbacks {
+			if apfb[""] != nil {
+				for alpn, pfb := range apfb {
+					if alpn != "" { // && alpn != "h2" {
+						for path, fb := range apfb[""] {
+							if pfb[path] == nil {
+								pfb[path] = fb
+							}
+						}
+					}
+				}
+			}
+		}
+		if handler.fallbacks[""] != nil {
+			for name, apfb := range handler.fallbacks {
+				if name != "" {
+					for alpn, pfb := range handler.fallbacks[""] {
+						for path, fb := range pfb {
+							if apfb[alpn][path] == nil {
+								apfb[alpn][path] = fb
+							}
 						}
 					}
 				}
@@ -175,8 +202,8 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection i
 	var requestAddons *encoding.Addons
 	var err error
 
-	apfb := h.fallbacks
-	isfb := apfb != nil
+	napfb := h.fallbacks
+	isfb := napfb != nil
 
 	if isfb && firstLen < 18 {
 		err = newError("fallback directly")
@@ -193,36 +220,46 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection i
 
 			name := ""
 			alpn := ""
-			if len(apfb) > 1 || apfb[""] == nil {
-				if tlsConn, ok := iConn.(*tls.Conn); ok {
-					name = tlsConn.ConnectionState().ServerName
-					alpn = tlsConn.ConnectionState().NegotiatedProtocol
-					newError("realServerName = " + name).AtInfo().WriteToLog(sid)
-					newError("realAlpn = " + alpn).AtInfo().WriteToLog(sid)
-				} else if xtlsConn, ok := iConn.(*xtls.Conn); ok {
-					name = xtlsConn.ConnectionState().ServerName
-					alpn = xtlsConn.ConnectionState().NegotiatedProtocol
-					newError("realServerName = " + name).AtInfo().WriteToLog(sid)
-					newError("realAlpn = " + alpn).AtInfo().WriteToLog(sid)
-				}
-				labels := strings.Split(name, ".")
-				for i := range labels {
-					labels[i] = "*"
-					candidate := strings.Join(labels, ".")
-					if apfb[candidate] != nil {
-						name = candidate
-						break
-					}
-				}
-				if apfb[name] == nil {
-					name = ""
-				}
-				if apfb[name][alpn] == nil {
-					alpn = ""
-				}
-
+			if tlsConn, ok := iConn.(*tls.Conn); ok {
+				cs := tlsConn.ConnectionState()
+				name = cs.ServerName
+				alpn = cs.NegotiatedProtocol
+				newError("realName = " + name).AtInfo().WriteToLog(sid)
+				newError("realAlpn = " + alpn).AtInfo().WriteToLog(sid)
+			} else if xtlsConn, ok := iConn.(*xtls.Conn); ok {
+				cs := xtlsConn.ConnectionState()
+				name = cs.ServerName
+				alpn = cs.NegotiatedProtocol
+				newError("realName = " + name).AtInfo().WriteToLog(sid)
+				newError("realAlpn = " + alpn).AtInfo().WriteToLog(sid)
 			}
-			pfb := apfb[name][alpn]
+			name = strings.ToLower(name)
+			alpn = strings.ToLower(alpn)
+
+			if len(napfb) > 1 || napfb[""] == nil {
+				if name != "" && napfb[name] == nil {
+					match := ""
+					for n := range napfb {
+						if n != "" && strings.Contains(name, n) && len(n) > len(match) {
+							match = n
+						}
+					}
+					name = match
+				}
+			}
+
+			if napfb[name] == nil {
+				name = ""
+			}
+			apfb := napfb[name]
+			if apfb == nil {
+				return newError(`failed to find the default "name" config`).AtWarning()
+			}
+
+			if apfb[alpn] == nil {
+				alpn = ""
+			}
+			pfb := apfb[alpn]
 			if pfb == nil {
 				return newError(`failed to find the default "alpn" config`).AtWarning()
 			}
@@ -299,39 +336,48 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection i
 			postRequest := func() error {
 				defer timer.SetTimeout(sessionPolicy.Timeouts.DownlinkOnly)
 				if fb.Xver != 0 {
+					ipType := 4
 					remoteAddr, remotePort, err := net.SplitHostPort(connection.RemoteAddr().String())
 					if err != nil {
-						return err
+						ipType = 0
 					}
 					localAddr, localPort, err := net.SplitHostPort(connection.LocalAddr().String())
 					if err != nil {
-						return err
+						ipType = 0
 					}
-					ipv4 := true
-					for i := 0; i < len(remoteAddr); i++ {
-						if remoteAddr[i] == ':' {
-							ipv4 = false
-							break
+					if ipType == 4 {
+						for i := 0; i < len(remoteAddr); i++ {
+							if remoteAddr[i] == ':' {
+								ipType = 6
+								break
+							}
 						}
 					}
 					pro := buf.New()
 					defer pro.Release()
 					switch fb.Xver {
 					case 1:
-						if ipv4 {
+						if ipType == 0 {
+							pro.Write([]byte("PROXY UNKNOWN\r\n"))
+							break
+						}
+						if ipType == 4 {
 							pro.Write([]byte("PROXY TCP4 " + remoteAddr + " " + localAddr + " " + remotePort + " " + localPort + "\r\n"))
 						} else {
 							pro.Write([]byte("PROXY TCP6 " + remoteAddr + " " + localAddr + " " + remotePort + " " + localPort + "\r\n"))
 						}
-
 					case 2:
-						pro.Write([]byte("\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A\x21")) // signature + v2 + PROXY
-						if ipv4 {
-							pro.Write([]byte("\x11\x00\x0C")) // AF_INET + STREAM + 12 bytes
+						pro.Write([]byte("\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A")) // signature
+						if ipType == 0 {
+							pro.Write([]byte("\x20\x00\x00\x00")) // v2 + LOCAL + UNSPEC + UNSPEC + 0 bytes
+							break
+						}
+						if ipType == 4 {
+							pro.Write([]byte("\x21\x11\x00\x0C")) // v2 + PROXY + AF_INET + STREAM + 12 bytes
 							pro.Write(net.ParseIP(remoteAddr).To4())
 							pro.Write(net.ParseIP(localAddr).To4())
 						} else {
-							pro.Write([]byte("\x21\x00\x24")) // AF_INET6 + STREAM + 36 bytes
+							pro.Write([]byte("\x21\x21\x00\x24")) // v2 + PROXY + AF_INET6 + STREAM + 36 bytes
 							pro.Write(net.ParseIP(remoteAddr).To16())
 							pro.Write(net.ParseIP(localAddr).To16())
 						}
@@ -427,6 +473,25 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection i
 	case "":
 	default:
 		return newError("unknown request flow " + requestAddons.Flow).AtWarning()
+	}
+
+	// Handle SMUX command
+	if request.Command == protocol.RequestCommandSmux {
+		vlessConn := NewInboundConn(connection, h.validator)
+		smuxSession, err := smux.Server(vlessConn, nil)
+		if err != nil {
+			return err
+		}
+		defer smuxSession.Close()
+
+		for {
+			smuxStream, err := smuxSession.AcceptStream()
+			if err != nil {
+				return newError("failed to get mux stream")
+			}
+			go simplesocks.HandleInboundConnection(ctx, smuxStream, dispatcher)
+		}
+		return nil
 	}
 
 	if request.Command != protocol.RequestCommandMux {
